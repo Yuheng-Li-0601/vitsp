@@ -23,7 +23,10 @@ class Concorde:
         self.tsp_file_path = file_path if file_path else self._generate_pseudo_file()
 
     def _generate_pseudo_file(self):
-        fd, path = tempfile.mkstemp(suffix=".tsp", prefix="concorde_sub_", dir="/tmp")
+        # Each Concorde invocation gets its own temp directory to avoid
+        # intermediate-file conflicts when running multiple solvers in parallel.
+        self._tmpdir = tempfile.mkdtemp(prefix="concorde_run_")
+        fd, path = tempfile.mkstemp(suffix=".tsp", prefix="concorde_sub_", dir=self._tmpdir)
         with os.fdopen(fd, 'w') as f:
             f.write(f"NAME : Pseudo_TSP\nTYPE: TSP\n")
             if self.dist_matrix is not None:
@@ -44,8 +47,10 @@ class Concorde:
 
     def optimize(self, timelimit: float = -1.0, verbose=False):
         start_time = time.time()
-        base_name = os.path.basename(self.tsp_file_path)
-        sol_file = base_name.replace(".tsp", ".sol")
+        # Use absolute path so the solution file is found regardless of
+        # the Python process's working directory.
+        work_dir = getattr(self, '_tmpdir', os.path.dirname(self.tsp_file_path))
+        sol_file = self.tsp_file_path.replace(".tsp", ".sol")
         
         try:
             timeout_val = timelimit if timelimit > 0 else None
@@ -54,13 +59,15 @@ class Concorde:
                            stderr=subprocess.PIPE,
                            check=True,
                            timeout=timeout_val,
-                           cwd="/tmp")
+                           cwd=work_dir)
             
             if os.path.exists(sol_file):
                 with open(sol_file, "r") as f:
                     data = f.read().split()
                     self.solution_route = [int(x) for x in data[1:]]
                     self.route = self.solution_route.copy()
+            else:
+                print(f"[WARNING] Concorde solution file not found: {sol_file}")
             
             self._calculate_obj()
             
@@ -101,6 +108,11 @@ class Concorde:
             f_to_del = self.tsp_file_path.replace(".tsp", ext)
             if os.path.exists(f_to_del): os.remove(f_to_del)
         if os.path.exists(self.tsp_file_path): os.remove(self.tsp_file_path)
+        # Remove the per-invocation temp directory if it was created
+        work_dir = getattr(self, '_tmpdir', None)
+        if work_dir and os.path.isdir(work_dir):
+            import shutil
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 def determine_instance_boundary(coordinates):
     MARGIN = 0  

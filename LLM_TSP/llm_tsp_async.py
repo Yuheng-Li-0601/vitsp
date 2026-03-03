@@ -36,8 +36,14 @@ from LLM_TSP.llm import GPT, RoundRobinLLMSelector, MODEL_TYPES
 from helper.plot_solution import SolutionPlot
 from LLM_TSP.selector import RandomSelector
 from LLM_TSP.llm_selector.llm_selector import _llm_producer
-from LLM_TSP.llm import LocalInternVL
+from LLM_TSP.llm import LocalInternVL, RemoteLocalModel
+from datetime import datetime
 
+# ---- 全局时间戳，保证同一次运行内所有文件名一致 ----
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+OPENAI_API_1 = 'sk-VsV9Kt41SBXzRymbW8Jma1m11jgNr2RNu5ZcrI9r0sosmTMZ'
+OPENAI_API_2 = 'sk-aV449yShGrO2t6omIo2QKFKLowmjPmUaP5qU52CKavy08o0h'
 
 INTERN_URL = "https://chat.intern-ai.org.cn/api/v1/"
 
@@ -100,10 +106,10 @@ def dynamic_worker_manager(config):
     logger = logging.getLogger(__name__)
 
     capacity_check = lambda: (
-            (config.pending_re_subproblem_queue.qsize() > 0 or
-            config.pending_ft_subproblem_queue.qsize() > 0) or 
-            (config.gain_subproblem_queue.qsize() >0)
-            and len(active_processes) < 1
+            ((config.pending_re_subproblem_queue.qsize() > 0 or
+              config.pending_ft_subproblem_queue.qsize() > 0) or 
+             config.gain_subproblem_queue.qsize() > 0)
+            and len(active_processes) < config.args.max_workers
         )
     
     active_processes: Dict[mp.Process, "Subproblem"] = {}
@@ -215,14 +221,11 @@ def verifier_manager(config):
                     
 def launch_llm_process(name,config):
 
-    # instance_name = Path(config.args.instance_path).stem
-    # _configure_logging(instance_name)
-    # log = logging.getLogger()
-
     instance_name = Path(config.args.instance_path).stem
-    log_dir = Path("/workspace/codes/vitsp/experiments/logs")
-    log_file_path = log_dir / f"{instance_name}_print.log"
-    sys.stdout = PrintLogger(log_file_path)
+    run_dir = Path(f"/workspace/codes/vitsp/experiments/runs/{instance_name}_{RUN_TIMESTAMP}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_file_path = run_dir / f"{name}_print.log"
+    sys.stdout = PrintLogger(str(log_file_path))
     sys.stderr = sys.stdout
     
     print(f"[{name}] started llm process")
@@ -302,97 +305,117 @@ def tsp_instance_initializer(args):
 
 def dump_global_obj_queue(q: Queue, csv_path: str | Path):
     """
-    实时追加记录到 CSV 文件中。
-    如果文件不存在，则先写入表头。
+    Drain queue into a CSV and return the list of record dicts.
     """
-    records_saved = 0
-    file_exists = os.path.isfile(csv_path)
-    
+    records: list[dict] = []
     while True:
         try:
-            # get_nowait 会非阻塞地从队列拿数据，如果没有就报错 Empty
             rec = q.get_nowait()
-            rec_dict = asdict(rec)
-            
-            with open(csv_path, mode='a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=rec_dict.keys())
-                # 只有当文件刚创建，且是第一条记录时才写表头
-                if not file_exists and records_saved == 0:
-                    writer.writeheader()
-                writer.writerow(rec_dict)
-                
-            records_saved += 1
-            file_exists = True # 写完第一条后，文件肯定存在了
-            
+            records.append(asdict(rec))
         except queue.Empty:
-            break # 队列空了，退出循环
-            
-    return records_saved
+            break
+
+    if records:
+        Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, mode='w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=records[0].keys())
+            writer.writeheader()
+            writer.writerows(records)
+
+    return records
 
 def pin(proc: mp.Process, cores: list[int]) -> None:
     """Bind *proc* to the given CPU *cores*."""
     psutil.Process(proc.pid).cpu_affinity(cores)
 
-def save_experiment_report(config, routes, coordinates, instance_name):
+def save_experiment_report(solution_plotter, routes, coordinates, run_dir,
+                          X_MIN, X_MAX, Y_MIN, Y_MAX, GRID_RES,
+                          selection_traj_queue=None, tag="final",
+                          gain_coords=None):
     """
-    整合打印逻辑：生成最终路径图和模型决策热力图
+    保存路径图(.png)，可选叠加 gain>0 选框。
+    tag 用于区分 initial / final。
+    gain_coords: list of (x_min, x_max, y_min, y_max) tuples — 仅 gain>0 的有效区域。
     """
     import pandas as pd
+    import matplotlib.patches as mpatches
     from pathlib import Path
 
-    save_dir = Path("/workspace/codes/vitsp/experiments/plots")
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    # --- 图 1：最终路径图 (证明结果) ---
-    print(f"Generating final tour plot for {instance_name}...")
-    fig_final = config.solution_plotter.plot_tsp_solution(
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- 图 1：路径图 (可叠加 gain>0 选框) ---
+    print(f"Generating {tag} tour plot ...")
+    fig_tour = solution_plotter.plot_tsp_solution(
         routes=routes,
         coordinates=coordinates,
-        x_min=config.X_MIN, x_max=config.X_MAX,
-        y_min=config.Y_MIN, y_max=config.Y_MAX,
-        grid_resolution=config.GRID_RES
+        x_min=X_MIN, x_max=X_MAX,
+        y_min=Y_MIN, y_max=Y_MAX,
+        grid_resolution=GRID_RES
     )
-    fig_final.savefig(save_dir / f"{instance_name}_final_tour.png", dpi=300, bbox_inches='tight')
-    config.solution_plotter.close_fig(fig_final)
 
-    # --- fig 2：决策热力图 (展示过程) ---
-    # 从 selection_traj 队列中提取所有 LLM 选框的数据
-    records = []
-    while not config.selection_traj.empty():
-        try:
-            records.append(config.selection_traj.get_nowait())
-        except:
-            break
-            
-    if records:
-        print(f"Generating attention heatmap for {instance_name}...")
-        # 将数据转为 DataFrame 以匹配 subrectangles_heatmap 的输入
-        # 假设记录里包含 'Subrectangle Trajectory' 字段
-        traj_df = pd.DataFrame(records)
-        
-        fig_heat = config.solution_plotter.subrectangles_heatmap(
-            routes=routes,
-            coordinates=coordinates,
-            spreadheat_data=traj_df,
-            x_min=config.X_MIN, x_max=config.X_MAX,
-            y_min=config.Y_MIN, y_max=config.Y_MAX,
-            grid_resolution=config.GRID_RES
+    # 在 final 图上叠加所有 gain>0 的矩形选框
+    if gain_coords:
+        ax = fig_tour.axes[0]
+        for (rx_min, rx_max, ry_min, ry_max) in gain_coords:
+            w, h = rx_max - rx_min, ry_max - ry_min
+            rect = mpatches.Rectangle(
+                (rx_min, ry_min), w, h,
+                linewidth=2, edgecolor='green', facecolor='green',
+                alpha=0.15, linestyle='--',
+            )
+            ax.add_patch(rect)
+        ax.legend(
+            [mpatches.Patch(edgecolor='green', facecolor='green', alpha=0.15, linestyle='--')],
+            [f'Gain>0 regions ({len(gain_coords)})'],
+            fontsize=18, loc='upper right',
         )
-        fig_heat.savefig(save_dir / f"{instance_name}_decision_heatmap.png", dpi=300, bbox_inches='tight')
-        config.solution_plotter.close_fig(fig_heat)
-    else:
-        print("No selection trajectory found, skipping heatmap.")
 
-    print(f"Report saved to {save_dir}")
+    fig_tour.savefig(run_dir / f"{tag}_tour.png",
+                     dpi=300, bbox_inches='tight')
+    solution_plotter.close_fig(fig_tour)
+
+    # --- 图 2 + CSV：LLM 选区热力图 ---
+    if selection_traj_queue is not None:
+        records = []
+        while not selection_traj_queue.empty():
+            try:
+                records.append(selection_traj_queue.get_nowait())
+            except Exception:
+                break
+
+        if records:
+            traj_df = pd.DataFrame(records)
+            csv_path = run_dir / "llm_selections.csv"
+            traj_df.to_csv(csv_path, index=False)
+            print(f"Saved {len(traj_df)} LLM selection records → {csv_path}")
+
+            print("Generating LLM selection heatmap ...")
+            fig_heat = solution_plotter.subrectangles_heatmap(
+                routes=routes,
+                coordinates=coordinates,
+                spreadheat_data=traj_df,
+                x_min=X_MIN, x_max=X_MAX,
+                y_min=Y_MIN, y_max=Y_MAX,
+                grid_resolution=GRID_RES
+            )
+            fig_heat.savefig(run_dir / "llm_selection_heatmap.png",
+                             dpi=300, bbox_inches='tight')
+            solution_plotter.close_fig(fig_heat)
+        else:
+            print("No LLM selection records found, skipping heatmap.")
+
+    print(f"Report ({tag}) saved to {run_dir}")
 
 def main(args):
     instance_name = Path(args.instance_path).stem
 
-    log_dir = Path("/workspace/codes/vitsp/experiments/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file_path = log_dir / f"{instance_name}_print.log"
+    # ---- 统一输出目录：所有产物放到同一个 run_dir ----
+    run_dir = Path(f"/workspace/codes/vitsp/experiments/runs/{instance_name}_{RUN_TIMESTAMP}")
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    sys.stdout = PrintLogger(log_file_path)
+    log_file_path = run_dir / "main_print.log"
+    sys.stdout = PrintLogger(str(log_file_path))
     sys.stderr = sys.stdout
     #_configure_logging(instance_name)
     #log = logging.getLogger()
@@ -401,8 +424,10 @@ def main(args):
     X_MIN, X_MAX, Y_MIN, Y_MAX, GRID_RES = boundary_info 
 
     #fast_thinking_llm_selector = RoundRobinLLMSelector([GPT(OPENAI_API_1, MODEL_TYPES[args.fast_llm_model], base_url=INTERN_URL)])
-    local_model_path = "/workspace/codes/vitsp/InternVL3_5-8B-Flash" 
-    fast_thinking_llm_selector = RoundRobinLLMSelector([LocalInternVL(model_path=local_model_path)])
+    # local_model_path = "/workspace/codes/vitsp/InternVL3_5-8B-Flash" 
+    # fast_thinking_llm_selector = RoundRobinLLMSelector([LocalInternVL(model_path=local_model_path)])
+    fast_thinking_llm_selector = RoundRobinLLMSelector([
+    RemoteLocalModel(api_url="http://localhost:8000/generate")])
     
     reasoning_llm_selector = RoundRobinLLMSelector([GPT(OPENAI_API_2, MODEL_TYPES[args.reasoning_llm_model], base_url=INTERN_URL)])
 
@@ -451,6 +476,21 @@ def main(args):
 
         with open(f'/workspace/codes/vitsp/experiments/LKH_solutions/{instance_name}_solution.json', 'w') as f:
             json.dump(data, f)
+
+    # -------- 保存初始解图片 --------
+    print(f"Saving initial solution plot for {instance_name}...")
+    save_experiment_report(
+        solution_plotter=solution_plotter,
+        routes=current_route,
+        coordinates=tsp_instance.coords,
+        run_dir=run_dir,
+        X_MIN=X_MIN, X_MAX=X_MAX,
+        Y_MIN=Y_MIN, Y_MAX=Y_MAX,
+        GRID_RES=GRID_RES,
+        selection_traj_queue=None,
+        tag="initial"
+    )
+
     # -------- shared queues and values among parallel processes
     gain_subproblem_queue       = mp.Queue() # used to save subproblems with definite gains
     pending_ft_subproblem_queue = mp.Queue() # save the pending subproblems from fast thinking LLM
@@ -573,9 +613,21 @@ def main(args):
 
     instance_name = Path(args.instance_path).stem
 
-    saved_count = dump_global_obj_queue(track_global_obj_queue,
-                            f'/workspace/codes/vitsp/experiments/LLM_TSP_exp/{instance_name}_max_nodes_{args.max_node_for_solver}_time_budget_{args.total_time_budget}_initial_{args.initial_solution_model}_llm_{args.fast_llm_model}_{args.reasoning_llm_model}_solver_{args.solver_model}_subproblem_{args.llm_subproblem_selection}_parallel_workers.csv')
-    print("Saved", saved_count, "records")
+    all_records = dump_global_obj_queue(
+        track_global_obj_queue,
+        run_dir / f"trajectory_{args.max_node_for_solver}nodes_{args.total_time_budget}s_{args.solver_model}.csv",
+    )
+    print(f"Saved {len(all_records)} trajectory records")
+
+    # ---- 提取 gain>0 的有效选框坐标 ----
+    gain_coords = []
+    for rec in all_records:
+        if rec.get("is_improvement") and rec.get("coords"):
+            for coord in rec["coords"]:
+                # coord is (x_min, x_max, y_min, y_max)
+                if isinstance(coord, (list, tuple)) and len(coord) == 4:
+                    gain_coords.append(tuple(coord))
+    print(f"Found {len(gain_coords)} gain>0 rectangles for final overlay")
 
     
     verifier_proc.join(timeout=5)
@@ -598,12 +650,17 @@ def main(args):
         fast_thinking_llm_proc.join()
 
     print("All processes finished. Generating visual reports...")
-    # 注意：使用 list(global_sol) 确保数据被正确读取
     save_experiment_report(
-        config=solver_config, 
-        routes=list(global_sol), 
-        coordinates=tsp_instance.node_coords, 
-        instance_name=instance_name
+        solution_plotter=solution_plotter,
+        routes=list(global_sol),
+        coordinates=tsp_instance.coords,
+        run_dir=run_dir,
+        X_MIN=X_MIN, X_MAX=X_MAX,
+        Y_MIN=Y_MIN, Y_MAX=Y_MAX,
+        GRID_RES=GRID_RES,
+        selection_traj_queue=selection_traj,
+        tag="final",
+        gain_coords=gain_coords,
     )
 
     # instance_name = Path(args.instance_path).stem
@@ -627,7 +684,7 @@ if __name__ == "__main__":
                         help='Path to the instance file')
     parser.add_argument('--max_iterations', type=int, default=5,
                         help='Maximum number of iterations for optimization')
-    parser.add_argument('--total_time_budget', type=float, default=2000,
+    parser.add_argument('--total_time_budget', type=float, default=400,
                         help='Wall time in seconds')
     parser.add_argument('--max_workers', type=int, default=4,
                         help='Maximum number of solvers working in parallel')
@@ -642,9 +699,9 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------------------
     parser.add_argument('--solver_model', type=str, default='concorde',
                         help='solver name for reoptimization')
-    parser.add_argument('--SolverTimeLimit', type=float, default=10,
+    parser.add_argument('--SolverTimeLimit', type=float, default=20,
                         help='Time allowed for Concorde solver')
-    parser.add_argument('--max_node_for_solver', type=int, default=1000,
+    parser.add_argument('--max_node_for_solver', type=int, default=400,
                         help='Max number of nodes sent to solver')
 
     # ---------------------------------------------------------------------------
@@ -673,10 +730,10 @@ if __name__ == "__main__":
     print('The instance path is ', file_path)
     tsp_files = [
         # 'dsj1000.tsp',
-        #'pr1002.tsp',
-        # 'u1060.tsp',
-        # 'vm1084.tsp',
-        # 'pcb1173.tsp',
+        # 'pr1002.tsp',
+        'u1060.tsp',
+        #  'vm1084.tsp',
+        #  'pcb1173.tsp',
         # 'd1291.tsp',
         # 'rl1304.tsp',
         # 'rl1323.tsp',
@@ -703,7 +760,7 @@ if __name__ == "__main__":
         # 'brd14051.tsp',
         # 'd15112.tsp',
         # 'd18512.tsp',
-        'pla33810.tsp',
+        #'pla33810.tsp',
         # 'pla85900.tsp',
     ]
 

@@ -57,6 +57,8 @@ class GlobalObjRecord:
     global_solution_version : int
     # which subprocess
     process_name: str = ""
+    # whether this record actually improved the global solution
+    is_improvement: bool = False
 
 class SubTSPTask:
     def __init__(self, id, current_route, removed_nodes, route_segments, coordinates, parent=False, child=False):
@@ -236,43 +238,59 @@ def reformulate_and_solve_subTSP(args, tsp_instance, current_route, current_obj,
                      route_segments=route_segments,
                      free_nodes=removed_nodes,
                      starting_point=current_route[0])
-    sub_tsp.reformulate_as_ATSP() # build an ATSP distance mat
+    sub_tsp.reformulate_as_ATSP()  # build an ATSP distance mat
 
     start_time = time.time()
-    stsp_mat = sub_tsp.transform_partial_ATSP_into_STSP(ATSP_dist_mat=sub_tsp.distance_mat)
-    print('Runtime for partial ATSP is: ', time.time() - start_time)
 
-    start_time = time.time()
-    # new_route, new_obj, solver_name = parallel_solvers(args, stsp_mat, sub_tsp, tsp_instance)
-    if args.solver_model == 'concorde' and len(removed_nodes) >= 5:
-        try:
-            sub_solver_model = Concorde(dist_matrix=stsp_mat)
-            sub_solver_model.optimize(timelimit=args.SolverTimeLimit, verbose=False)
+    if len(removed_nodes) < 3:
+        # ---------------------------------------------------------------
+        # Brute-force directly on the ATSP matrix.
+        # removed_nodes < 5 → at most 4 free nodes + ~5 segments ≈ 9
+        # pseudo-nodes.  Fix node-0, enumerate (n-1)! ≤ 8! = 40 320
+        # permutations – a few ms in pure Python.
+        #
+        # Key advantage: works on the asymmetric matrix natively, so we
+        # skip transform_partial_ATSP_into_STSP AND filter_dummy_nodes
+        # entirely, avoiding the ghost-node doubling + reversal pitfalls.
+        # ---------------------------------------------------------------
+        from itertools import permutations
 
-            raw_route = sub_solver_model.get_tsp_route()
-            optimized_sub_tsp = sub_tsp.filter_dummy_nodes(route=raw_route,
-                                                               num_ori_nodes=len(sub_tsp.node_list))
-            new_route = sub_tsp.resume_master_route(optimized_sub_tsp)
-            new_obj = tsp_instance.calculate_total_distance(new_route)
-            # optimized_sub_tsp = sub_tsp.filter_dummy_nodes(route=sub_solver_model.get_tsp_route(),
-            #                                                num_ori_nodes=len(sub_tsp.node_list))
-            # new_route = sub_tsp.resume_master_route(optimized_sub_tsp)
-            # new_obj = tsp_instance.calculate_total_distance(new_route)
-        except Exception as e:
-            # Log the error with additional context and fallback gracefully
-            print(f"Error occurred during Concorde optimization: {e}")
-            print("Falling back to current route and objective.")
+        n = len(sub_tsp.node_list)
+        dist = sub_tsp.distance_mat            # raw ATSP matrix, untouched
+        best_route, best_cost = None, float('inf')
+        others = list(range(1, n))
+        for perm in permutations(others):
+            route = [0] + list(perm)
+            cost = sum(dist[route[i]][route[(i + 1) % n]] for i in range(n))
+            if cost < best_cost:
+                best_cost = cost
+                best_route = route
 
-            # Fallback to the current route and objective
-            new_route = current_route
-            new_obj = current_obj
+        # resume_master_route maps pseudo-node indices → real nodes/segments
+        # No filter_dummy_nodes needed — there are no ghost nodes.
+        new_route = sub_tsp.resume_master_route(best_route)
+        new_obj = tsp_instance.calculate_total_distance(new_route)
 
-    elif len(removed_nodes) < 5:
-        sub_solver_model = GurobiTSPModel(nodes=sub_tsp.node_list,
-                                          distance_mat=sub_tsp.distance_mat)
-        # sub_solver_model.update_model_param(args)
-        sub_solver_model.optimize()
-        new_route = sub_tsp.resume_master_route(sub_solver_model.get_tsp_route()[:-1])
+    elif args.solver_model == 'concorde':
+        # ---------------------------------------------------------------
+        # Concorde is a symmetric solver → need ATSP→STSP conversion.
+        # This also doubles the matrix (ghost nodes) so filter_dummy_nodes
+        # is required afterwards.
+        # ---------------------------------------------------------------
+        t0_stsp = time.time()
+        stsp_mat = sub_tsp.transform_partial_ATSP_into_STSP(ATSP_dist_mat=sub_tsp.distance_mat)
+        print('Runtime for partial ATSP→STSP: ', time.time() - t0_stsp)
+
+        sub_solver_model = Concorde(dist_matrix=stsp_mat)
+        sub_solver_model.optimize(timelimit=args.SolverTimeLimit, verbose=False)
+
+        raw_route = sub_solver_model.get_tsp_route()
+        if not raw_route:
+            print(f"[WARNING] Concorde returned empty route, falling back to current solution")
+            return current_route, current_obj, time.time() - start_time
+        optimized_sub_tsp = sub_tsp.filter_dummy_nodes(route=raw_route,
+                                                       num_ori_nodes=len(sub_tsp.node_list))
+        new_route = sub_tsp.resume_master_route(optimized_sub_tsp)
         new_obj = tsp_instance.calculate_total_distance(new_route)
 
     solver_latency = time.time() - start_time
@@ -497,35 +515,30 @@ def subproblem_solver(subproblem, config):
 
     # ---------------------------------
     # hill-climbing acceptance criteria
+    # NOTE: lock order must be sol_lock → obj_lock everywhere to avoid deadlock
     # ---------------------------------
-    with config.obj_lock, config.sol_lock:
-        # if subproblem.solution_version != config.global_obj.value:
-        #     log.info("Find different version of solution")
-        # elif subproblem.solution_version == config.global_obj.value:
+    with config.sol_lock, config.obj_lock:
         delta_obj = new_obj - config.global_obj.value
 
         if delta_obj < 0:
-            with config.obj_lock:
-                old_obj = config.global_obj.value
-                config.global_obj.value = new_obj
-            with config.sol_lock:
-                config.global_sol[:] = new_route[:]
+            old_obj = config.global_obj.value
+            config.global_obj.value = new_obj
+            config.global_sol[:] = new_route[:]
         else:
-            with config.obj_lock:
-                old_obj = config.global_obj.value
+            old_obj = config.global_obj.value
 
-        with config.obj_lock:
-            now = round(time.time() - config.t0 + config.warmstart_latency, 2)
-            proc = mp.current_process()
-            record = GlobalObjRecord(
-                                    latency=now,
-                                    new_obj=config.global_obj.value,
-                                    coords=coordinates_list,
-                                    num_nodes_removed=len(removed_nodes),
-                                    llm_mode=subproblem.llm_source,
-                                    global_solution_version=subproblem.current_obj,
-                                    process_name=proc.name,
-                                    )
+        now = round(time.time() - config.t0 + config.warmstart_latency, 2)
+        proc = mp.current_process()
+        record = GlobalObjRecord(
+                                latency=now,
+                                new_obj=config.global_obj.value,
+                                coords=coordinates_list,
+                                num_nodes_removed=len(removed_nodes),
+                                llm_mode=subproblem.llm_source,
+                                global_solution_version=subproblem.current_obj,
+                                process_name=proc.name,
+                                is_improvement=(delta_obj < 0),
+                                )
 
         config.track_global_obj_queue.put(record)
         
@@ -536,8 +549,7 @@ def subproblem_solver(subproblem, config):
                 for task in no_impr_tasks:
                     config.selection_traj.put(format_task_traj(task))
 
-    with config.obj_lock:
-        log.info("updated obj %s→%s, using %s", old_obj, config.global_obj.value, subproblem.llm_source)
+    log.info("updated obj %s→%s, using %s", old_obj, config.global_obj.value, subproblem.llm_source)
 
 
 def subproblem_verifier(subproblem, config):
@@ -655,7 +667,8 @@ def subproblem_verifier(subproblem, config):
     # ---------------------------------
     # hill-climbing acceptance criteria
     # ---------------------------------
-    with config.obj_lock, config.sol_lock:
+    # NOTE: lock order must be sol_lock → obj_lock everywhere to avoid deadlock
+    with config.sol_lock, config.obj_lock:
         
         delta_obj = new_obj - config.global_obj.value
 

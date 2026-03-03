@@ -75,8 +75,9 @@ class SolutionPlot:
         ax.set_ylim(y_min, y_max)
 
         # Simplified grid with essential intervals
-        ax.set_xticks(range(x_min-10, x_max - 10, grid_resolution))
-        ax.set_yticks(range(y_min-10, y_max + 10, grid_resolution))
+        step = max(1, int(grid_resolution))
+        ax.set_xticks(range(int(x_min)-10, int(x_max) + 10, step))
+        ax.set_yticks(range(int(y_min)-10, int(y_max) + 10, step))
         ax.tick_params(axis='x', rotation=45, labelsize=25)
         ax.tick_params(axis='y', rotation=0, labelsize=25)
 
@@ -136,8 +137,9 @@ class SolutionPlot:
         ax.set_ylim(y_min, y_max)
 
         # Simplified grid with essential intervals
-        ax.set_xticks(range(x_min, x_max + 1, grid_resolution))
-        ax.set_yticks(range(y_min, y_max + 1, grid_resolution))
+        step = max(1, int(grid_resolution))
+        ax.set_xticks(range(int(x_min), int(x_max) + 1, step))
+        ax.set_yticks(range(int(y_min), int(y_max) + 1, step))
         ax.tick_params(axis='x', rotation=45, labelsize=30)
         ax.tick_params(axis='y', rotation=0, labelsize=30)
 
