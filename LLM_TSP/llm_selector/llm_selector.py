@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 import logging
+import os
+import re
 import psutil
 from typing import Iterable, List, Tuple, Union, Any, Dict
 from multiprocessing import Queue
@@ -9,6 +11,8 @@ import time
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 import random
+
+_NUM_RE = re.compile(r'<num>\s*([\d.]+)\s*</num>')
 
 @dataclass
 class Subproblem:

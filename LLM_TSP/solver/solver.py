@@ -98,7 +98,7 @@ def evaluate_best_gain(results, current_obj):
 
     return gain_tasks, no_impr_tasks
 
-def splice_longest_subroute(par: "Child", sub: "Child") -> None:
+def splice_longest_subroute(par: "SubTSPTask", sub: "SubTSPTask") -> None:
     
     needle = set(sub.removed_nodes)
     if not needle:
@@ -245,13 +245,7 @@ def reformulate_and_solve_subTSP(args, tsp_instance, current_route, current_obj,
     if len(removed_nodes) < 3:
         # ---------------------------------------------------------------
         # Brute-force directly on the ATSP matrix.
-        # removed_nodes < 5 → at most 4 free nodes + ~5 segments ≈ 9
-        # pseudo-nodes.  Fix node-0, enumerate (n-1)! ≤ 8! = 40 320
-        # permutations – a few ms in pure Python.
-        #
-        # Key advantage: works on the asymmetric matrix natively, so we
-        # skip transform_partial_ATSP_into_STSP AND filter_dummy_nodes
-        # entirely, avoiding the ghost-node doubling + reversal pitfalls.
+        # removed_nodes < 3 → very small, enumerate permutations.
         # ---------------------------------------------------------------
         from itertools import permutations
 
@@ -266,9 +260,19 @@ def reformulate_and_solve_subTSP(args, tsp_instance, current_route, current_obj,
                 best_cost = cost
                 best_route = route
 
-        # resume_master_route maps pseudo-node indices → real nodes/segments
-        # No filter_dummy_nodes needed — there are no ghost nodes.
         new_route = sub_tsp.resume_master_route(best_route)
+        new_obj = tsp_instance.calculate_total_distance(new_route)
+
+    elif GurobiTSPModel is not None and len(removed_nodes) < 5:
+        # ---------------------------------------------------------------
+        # Small subproblems (3-4 free nodes): use Gurobi exact solver.
+        # Works directly on the ATSP distance matrix without needing
+        # the ATSP→STSP ghost-node transformation.
+        # ---------------------------------------------------------------
+        sub_solver_model = GurobiTSPModel(nodes=sub_tsp.node_list,
+                                          distance_mat=sub_tsp.distance_mat)
+        sub_solver_model.optimize()
+        new_route = sub_tsp.resume_master_route(sub_solver_model.get_tsp_route()[:-1])
         new_obj = tsp_instance.calculate_total_distance(new_route)
 
     elif args.solver_model == 'concorde':
@@ -317,15 +321,13 @@ def process_subTSP(args, task, tsp_instance, current_route, current_obj, result_
 
 
 def format_task_traj(task):
-    coord_str = " ".join(
-        f"<coordinates> x_min={x_min}, x_max={x_max}, y_min={y_min}, y_max={y_max} </coordinates>"
-        for x_min, x_max, y_min, y_max in task.coordinates
-    )
-    return (
-        f"{coord_str}, number of nodes within the subrectangle={task.num_removed_nodes}, "
-        f"travel distance reduction={round(task.gain, 2)} (the higher the better), "
-        f"computation time for this subrectangle={round(task.solver_latency, 2)} sec \n"
-    )
+    """Return a structured dict for each solved sub-problem."""
+    return {
+        "coordinates": list(task.coordinates),        # list of (x_min, x_max, y_min, y_max)
+        "num_removed_nodes": task.num_removed_nodes,
+        "gain": round(task.gain, 2),
+        "solver_latency": round(task.solver_latency, 2),
+    }
 
 def sample_independent_subproblem(config, active_subproblems, gain_subproblem_queue, subproblem_re_queue, subproblem_ft_queue, traj_lock, current_route):
 

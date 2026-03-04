@@ -36,6 +36,8 @@ from transformers import AutoTokenizer, AutoModel
 
 MODEL_TYPES = {
     "gpt-4o": "gpt-4o",
+    "gpt-4.1": "gpt-4.1",
+    "o4-mini": "o4-mini",
     "o1": "o1",
     "qwen2.5-32b-reasoning": "Qwen/QwQ-32B",
     "qwen2.5-32b-v":"Qwen/Qwen2.5-VL-32B-Instruct",
@@ -43,6 +45,25 @@ MODEL_TYPES = {
     "intern-reasoning": "intern-latest",
     "intern-vl": "internvl3.5-latest",
     "local-server": "http://localhost:8000/generate"
+}
+
+# ---- Token pricing (USD per 1 M tokens) for cost tracking ----
+MODEL_PRICE_INPUT = {
+    "gpt-4o":       2.50,
+    "gpt-4.1":      2.00,
+    "gpt-4.1-mini": 0.40,
+    "gpt-4.1-nano": 0.10,
+    "o4-mini":      1.10,
+    "o1":          15.00,
+}
+
+MODEL_PRICE_OUTPUT = {
+    "gpt-4o":       10.00,
+    "gpt-4.1":       8.00,
+    "gpt-4.1-mini":  1.60,
+    "gpt-4.1-nano":  0.40,
+    "o4-mini":       4.40,
+    "o1":           60.00,
 }
 
 def build_transform(input_size=448):
@@ -165,25 +186,27 @@ class GPT:
 
         try:
             valid_result = response.choices[0].message.content
+            prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
+            completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
             print(valid_result)
-            return valid_result
+            return valid_result, prompt_tokens, completion_tokens
 
         except requests.exceptions.RequestException as e:
             # Handles network-related errors
             print(f"Network error occurred: {e}")
-            print(response.json())
+            return "", 0, 0
         except ValueError as e:
             # Handles JSON decoding errors
             print(f"Failed to parse JSON: {e}")
-            print(response.json())
+            return "", 0, 0
         except (KeyError, IndexError) as e:
             # Handles missing or unexpected JSON structure errors
             print(f"Unexpected JSON structure: {e}")
-            print(response.json())
+            return "", 0, 0
         except Exception as e:
             # Catch-all for any other unexpected errors
             print(f"An unexpected error occurred: {e}")
-            print(response.json())
+            return "", 0, 0
 
 class LocalInternVL:
     def __init__(self, model_path="/workspace/codes/vitsp/InternVL3_5-8B-Flash"):
@@ -265,10 +288,13 @@ class LocalInternVL:
         try:
             response = self.model.chat(self.tokenizer, pixel_values, extraction_prompts, generation_config)
             print(f"Local Model Vision Output: {response}")
-            return response
+            # Local models don't have token usage from API; estimate from tokenizer
+            prompt_tokens = len(self.tokenizer.encode(extraction_prompts)) if self.tokenizer else 0
+            completion_tokens = len(self.tokenizer.encode(response)) if self.tokenizer and response else 0
+            return response, prompt_tokens, completion_tokens
         except Exception as e:
             print(f"本地推理发生错误: {e}")
-            return ""
+            return "", 0, 0
 
 
 class RemoteLocalModel:
@@ -323,12 +349,15 @@ class RemoteLocalModel:
         try:
             response = requests.post(self.api_url, json=payload, timeout=90)
             if response.status_code == 200:
-                result = response.json().get("response", "")
+                resp_json = response.json()
+                result = resp_json.get("response", "")
+                prompt_tokens = resp_json.get("prompt_tokens", 0)
+                completion_tokens = resp_json.get("completion_tokens", 0)
                 print(f"本地模型返回: {result}")
-                return result
+                return result, prompt_tokens, completion_tokens
             else:
                 print(f"服务器报错: {response.text}")
-                return ""
+                return "", 0, 0
         except Exception as e:
             print(f"连接本地模型服务失败: {e}")
-            return ""
+            return "", 0, 0

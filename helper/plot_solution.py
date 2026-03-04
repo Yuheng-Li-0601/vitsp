@@ -118,18 +118,26 @@ class SolutionPlot:
 
         # Overlay rectangles based on spreadheat_data with transparency for density visualization
         for i, row in spreadheat_data.iterrows():
-            # Parse subrectangle boundaries
             try:
-                traj = row['Subrectangle Trajectory']
-                coords = [int(value.split('=')[1]) for value in traj.split(', ')]
-                rect_x_min, rect_x_max, rect_y_min, rect_y_max = coords
-
-                # Add rectangle with transparency
-                width, height = rect_x_max - rect_x_min, rect_y_max - rect_y_min
-                rect = patches.Rectangle((rect_x_min, rect_y_min), width, height, linewidth=1,
-                                         edgecolor='none', facecolor='blue', alpha=0.2)
-                ax.add_patch(rect)
-            except (ValueError, IndexError):
+                # New structured format: 'coordinates' column holds list of (x_min, x_max, y_min, y_max)
+                coord_list = row.get('coordinates', None)
+                if coord_list is None:
+                    # Legacy string format fallback
+                    traj = row['Subrectangle Trajectory']
+                    coords = [int(value.split('=')[1]) for value in traj.split(', ')]
+                    coord_list = [tuple(coords)]
+                # coord_list is a list of rectangles
+                if not isinstance(coord_list, list):
+                    import ast
+                    coord_list = ast.literal_eval(coord_list)
+                for rect_coords in coord_list:
+                    rect_x_min, rect_x_max, rect_y_min, rect_y_max = rect_coords
+                    width  = rect_x_max - rect_x_min
+                    height = rect_y_max - rect_y_min
+                    rect = patches.Rectangle((rect_x_min, rect_y_min), width, height, linewidth=1,
+                                             edgecolor='none', facecolor='blue', alpha=0.15)
+                    ax.add_patch(rect)
+            except (ValueError, IndexError, KeyError, TypeError):
                 continue  # Skip if there's an error in parsing
 
         # Set axis limits and labels

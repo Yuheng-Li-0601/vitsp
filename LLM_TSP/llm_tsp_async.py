@@ -26,6 +26,7 @@ from pathlib import Path
 import json
 
 from LLM_TSP.solver.solver import subproblem_solver, subproblem_verifier, sample_independent_subproblem, sample_next_subproblem, GlobalObjRecord   # single line import
+from LLM_TSP.llm_selector.llm_selector import Subproblem
 from LLM_TSP.config import LLMConfig, SolverConfig
 #from LLM_TSP.ablation_config import instance_max_nodes, instance_time_budget
 
@@ -729,22 +730,22 @@ if __name__ == "__main__":
     file_path = args.instance_path
     print('The instance path is ', file_path)
     tsp_files = [
-        # 'dsj1000.tsp',
-        # 'pr1002.tsp',
+        #'dsj1000.tsp',
+        'pr1002.tsp',
         'u1060.tsp',
-        #  'vm1084.tsp',
-        #  'pcb1173.tsp',
-        # 'd1291.tsp',
-        # 'rl1304.tsp',
-        # 'rl1323.tsp',
-        # 'nrw1379.tsp',
-        # 'fl1400.tsp',
-        # 'u1432.tsp',
-        # 'fl1577.tsp',
-        # 'd1655.tsp',
-        # 'vm1748.tsp',
-        # 'u1817.tsp',
-        # 'rl1889.tsp',
+        'vm1084.tsp',
+        'pcb1173.tsp',
+        'd1291.tsp',
+        'rl1304.tsp',
+        'rl1323.tsp',
+        'nrw1379.tsp',
+        'fl1400.tsp',
+        'u1432.tsp',
+        'fl1577.tsp',
+        'd1655.tsp',
+        'vm1748.tsp',
+        'u1817.tsp',
+        'rl1889.tsp',
         # 'd2103.tsp',
         # 'u2152.tsp',
         # 'u2319.tsp',
