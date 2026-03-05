@@ -120,7 +120,13 @@ def llm_visual_selection(args, solution_plotter, current_route, pending_subprobl
                                             y_max=int(y_max)
                                             )
 
-    coordinates_list = llm_parser.parse_subrectangle_coordinates(response)
+    # vision_chat returns (text, prompt_tokens, completion_tokens)
+    if isinstance(response, tuple):
+        response_text = response[0]
+    else:
+        response_text = response
+
+    coordinates_list = llm_parser.parse_subrectangle_coordinates(response_text)
 
     if coordinates_list[0][0] is None:
         coordinates_list = backup_selector.generate_subrectangle(X_MIN=x_min,

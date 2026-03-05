@@ -1,0 +1,27 @@
+在终端（项目根目录 /workspace/codes/vitsp 下）按顺序执行以下三条命令：
+
+# 1. 将所有最新的修改添加到暂存区
+git add .
+
+# 2. 提交修改，并注明本次修复的内容
+git commit -m "fix: resolve KeyError for Subrectangle Trajectory in plotting and update storage logic"
+
+# 3. 将本地提交推送到 GitHub 云端
+git push
+
+# 4. 创建并无缝切换到新分支：
+
+git checkout -b add-groot-model
+
+# 5. 将新分支推送到 GitHub 云端并进行绑定：
+
+git push -u origin add-groot-model
+
+如果你觉得最近的几次修改全盘皆输，想让整个项目彻底回到之前的某个节点（比如回到你刚拉新分支的那一刻）：
+
+同样先用 git log --oneline 查到你想回去的那个版本 ID。
+
+执行强制回退（注意：这会抹除该 ID 之后的所有修改，请谨慎使用）：
+
+Bash
+git reset --hard 你的历史版本ID
